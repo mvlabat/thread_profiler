@@ -8,8 +8,9 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::BufWriter;
 use std::string::String;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread;
 use time::precise_time_ns;
 
@@ -17,12 +18,13 @@ lazy_static! {
     static ref GLOBAL_PROFILER: Mutex<Profiler> = Mutex::new(Profiler::new());
 }
 
+static PROFILER_ENABLED: AtomicBool = AtomicBool::new(true);
+
 #[macro_export]
 macro_rules! profile_scope {
     ($string:expr) => {
         #[cfg(feature = "thread_profiler")]
-        let _profile_scope =
-            $crate::ProfileScope::new(format!("{}: {}", module_path!(), $string));
+        let _profile_scope = $crate::ProfileScope::new(format!("{}: {}", module_path!(), $string));
     };
 }
 
@@ -51,9 +53,9 @@ impl ThreadProfiler {
     fn push_sample(&self, name: String, t0: u64, t1: u64) {
         let sample = Sample {
             tid: self.id,
-            name: name,
-            t0: t0,
-            t1: t1,
+            name,
+            t0,
+            t1,
         };
         self.tx.send(sample).ok();
     }
@@ -70,8 +72,8 @@ impl Profiler {
         let (tx, rx) = channel();
 
         Profiler {
-            rx: rx,
-            tx: tx,
+            rx,
+            tx,
             threads: Vec::new(),
         }
     }
@@ -89,7 +91,7 @@ impl Profiler {
             assert!(profiler.borrow().is_none());
 
             let thread_profiler = ThreadProfiler {
-                id: id,
+                id,
                 tx: self.tx.clone(),
             };
 
@@ -142,7 +144,7 @@ pub struct ProfileScope {
 impl ProfileScope {
     pub fn new(name: String) -> ProfileScope {
         let t0 = precise_time_ns();
-        ProfileScope { name: name, t0: t0 }
+        ProfileScope { name, t0 }
     }
 }
 
@@ -155,7 +157,9 @@ impl Drop for ProfileScope {
 
         THREAD_PROFILER.with(|profiler| match *profiler.borrow() {
             Some(ref profiler) => {
-                profiler.push_sample(self.name.clone(), self.t0, t1);
+                if PROFILER_ENABLED.load(Ordering::Relaxed) {
+                    profiler.push_sample(self.name.clone(), self.t0, t1);
+                }
             }
             None => {
                 println!("ERROR: ProfileScope {} on unregistered thread!", self.name);
@@ -172,4 +176,25 @@ pub fn write_profile(filename: &str) {
 /// Registers the current thread with the global profiler.
 pub fn register_thread_with_profiler() {
     GLOBAL_PROFILER.lock().unwrap().register_thread();
+}
+
+/// Disables the global profiler (is enabled by default).
+pub fn disable_profiler() {
+    PROFILER_ENABLED.store(false, Ordering::Relaxed);
+}
+
+/// Enables the global profiler (is enabled by default).
+pub fn enable_profiler() {
+    PROFILER_ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// Toggles the global profiler (is enabled by default).
+pub fn toggle_profiler() {
+    let enabled = PROFILER_ENABLED.load(Ordering::Relaxed);
+    PROFILER_ENABLED.store(!enabled, Ordering::Relaxed);
+}
+
+/// Returns true if the global profiler is enabled.
+pub fn profiler_is_enabled() -> bool {
+    PROFILER_ENABLED.load(Ordering::Relaxed)
 }
